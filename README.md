@@ -11,7 +11,7 @@ Because writing shell utilities in Bash is like performing surgery with a butter
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/shelltape
+git clone https://github.com/ericst/shelltape
 # Add to your PATH or cry softly
 ```
 
