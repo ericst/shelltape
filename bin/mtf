@@ -1,0 +1,178 @@
+#!/usr/bin/env ruby
+# mtf - Markdown Table Formatter
+# Author: Eric Seuret
+# License: MIT
+#
+# MIT License
+#
+# Copyright (c) 2025 Eric Seuret
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Description:
+# A command-line tool that reads markdown tables from stdin and outputs properly
+# formatted tables with consistent column widths and alignment to stdout.
+# Follows the GitHub Flavored Markdown (GFM) table specification.
+#
+#
+# Usage:
+#   in vim :range!mtf
+#   mtf < input.md > output.md
+#   cat table.md | mtf
+#   echo "| Name | Age |\n|------|-----|\n| John | 25 |" | mtf
+#   
+# Examples:
+#   # Format a table file
+#   mtf < my_table.md > formatted_table.md
+#   
+#   # Use in a pipe
+#   grep -A 10 "Table:" README.md | mtf
+#   
+#   # Chain with other tools
+#   curl -s https://api.github.com/table.md | mtf | less
+#   
+#   # Suppress warnings
+#   mtf < messy_table.md 2>/dev/null
+
+# Read all input from stdin
+input = STDIN.read.strip
+
+# Split into lines and filter out empty lines
+lines = input.split("\n").reject(&:empty?)
+
+# Parse the table according to GFM specification
+rows = []
+header_row_index = nil
+delimiter_row_index = nil
+delimiter_like_rows = []
+
+lines.each_with_index do |line, index|
+  # Remove leading/trailing whitespace and pipes
+  clean_line = line.strip.gsub(/^\||\|$/, '')
+  
+  # Split by pipes and clean each cell
+  cells = clean_line.split('|').map(&:strip)
+  
+  # Check if this looks like a delimiter line (contains only dashes, spaces, and colons)
+  if cells.all? { |cell| cell.match?(/^[\s\-:]*$/) && cell.include?('-') }
+    delimiter_like_rows << index
+    # The first delimiter-like row after the first row is the official delimiter
+    if delimiter_row_index.nil? && index > 0
+      delimiter_row_index = index
+      header_row_index = 0  # First row is header according to GFM spec
+    end
+  end
+  
+  rows << cells
+end
+
+# Validate GFM table structure and provide helpful warnings
+if delimiter_row_index.nil?
+  STDERR.puts "Warning: No delimiter row found. Table may not render properly in markdown."
+elsif header_row_index != 0
+  STDERR.puts "Warning: Delimiter row should come after header row for proper GFM table structure."
+end
+
+# Check for column count consistency
+if delimiter_row_index && rows.length > 1
+  header_cols = rows[0].length
+  delimiter_cols = rows[delimiter_row_index].length
+  if header_cols != delimiter_cols
+    STDERR.puts "Warning: Header row has #{header_cols} columns but delimiter row has #{delimiter_cols} columns."
+  end
+  
+  # Check data rows for significant column count mismatches
+  rows.each_with_index do |row, index|
+    next if index == 0 || index == delimiter_row_index
+    if (row.length - header_cols).abs > 1  # Allow 1 column difference for flexibility
+      STDERR.puts "Warning: Row #{index + 1} has #{row.length} columns, expected around #{header_cols}."
+    end
+  end
+end
+
+# Calculate maximum width for each column
+max_widths = []
+rows.each do |row|
+  row.each_with_index do |cell, col_index|
+    max_widths[col_index] = [max_widths[col_index] || 0, cell.length].max
+  end
+end
+
+# Determine alignment from the official delimiter row (if exists)
+alignments = []
+if delimiter_row_index
+  rows[delimiter_row_index].each do |cell|
+    if cell.start_with?(':') && cell.end_with?(':')
+      alignments << :center
+    elsif cell.end_with?(':')
+      alignments << :right
+    else
+      alignments << :left
+    end
+  end
+else
+  # Default to left alignment if no proper delimiter found
+  alignments = [:left] * (rows.first&.length || 0)
+end
+
+# Ensure we have alignments for all columns
+while alignments.length < max_widths.length
+  alignments << :left
+end
+
+# Format and output the table
+rows.each_with_index do |row, row_index|
+  formatted_cells = row.map.with_index do |cell, col_index|
+    # Ensure we don't go out of bounds
+    width = max_widths[col_index] || cell.length
+    alignment = alignments[col_index] || :left
+    
+    if delimiter_like_rows.include?(row_index)
+      # Format delimiter rows according to detected alignment
+      case alignment
+      when :center
+        if width >= 3
+          ':' + '-' * (width - 2) + ':'
+        else
+          ':-:'  # Minimum width for center alignment
+        end
+      when :right
+        if width >= 2
+          '-' * (width - 1) + ':'
+        else
+          '-:'  # Minimum width for right alignment
+        end
+      else # :left
+        '-' * width
+      end
+    else
+      # Format content according to column alignment
+      case alignment
+      when :center
+        cell.center(width)
+      when :right
+        cell.rjust(width)
+      else # :left
+        cell.ljust(width)
+      end
+    end
+  end
+  
+  puts "| #{formatted_cells.join(' | ')} |"
+end
