@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -xeu
+
+# Cleanup function
+cleanup() {
+    rm -f /tmp/opencode-linux-x64.zip
+}
+trap cleanup EXIT
+
+# Create bin directory if it doesn't exist
+mkdir -p $HOME/bin
+
+# Get the latest release download URL for the zip file
+DOWNLOAD_URL=$(curl -s https://api.github.com/repos/sst/opencode/releases/latest | grep "browser_download_url.*opencode-linux-x64.zip" | cut -d '"' -f 4)
+
+# Download the zip file
+curl -L $DOWNLOAD_URL -o /tmp/opencode-linux-x64.zip
+
+# Extract to $HOME/bin
+unzip -o /tmp/opencode-linux-x64.zip -d $HOME/bin
+
+# Make executable
+chmod +x $HOME/bin/opencode
+
+echo "opencode installed to $HOME/bin/opencode"
+echo "Make sure $HOME/bin is in your PATH"
