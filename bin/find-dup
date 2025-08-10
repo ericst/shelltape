@@ -1,0 +1,333 @@
+#!/usr/bin/env ruby
+# find-dup - Find Duplicate Files by Content
+# Author: Eric Seuret
+# License: MIT
+#
+# MIT License
+#
+# Copyright (c) 2025 Eric Seuret
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Description:
+# A command-line tool that finds duplicate files by comparing their SHA512 hashes.
+# Scans directories recursively, skipping hidden files and directories, and groups
+# identical files together. Supports various output formats and filtering options.
+#
+# Usage:
+#   find-dup [OPTIONS] [DIRECTORY]
+#   find-dup /home/user
+#   find-dup --bigger 1MB .
+#   find-dup --quiet --format=list .
+#   
+# Examples:
+#   # Find duplicates in home directory
+#   find-dup
+#   
+#   # Find duplicates larger than 1MB in current directory
+#   find-dup --bigger 1MB .
+#   
+#   # Output as JSON for processing
+#   find-dup --format=json /path/to/scan
+#   
+#   # Get list of longest paths for removal
+#   find-dup --format=null --select=longest . | xargs -0 rm
+#   
+#   # Quiet mode with custom directory
+#   find-dup --quiet /media/storage
+
+require 'digest'
+require 'find'
+
+def parse_size(size_str)
+  # Match number followed by optional unit
+  match = size_str.match(/^(\d+(?:\.\d+)?)\s*(B|[KMGT]i?B)$/i)
+  
+  unless match
+    warn "Error: Invalid size format '#{size_str}'"
+    exit 1
+  end
+  
+  number = match[1].to_f
+  unit = match[2].upcase
+  
+  case unit
+  when 'B' then number
+  # Binary units (1024-based)
+  when 'kiB' then number * 1024
+  when 'MiB' then number * 1024 * 1024
+  when 'GiB' then number * 1024 * 1024 * 1024
+  when 'TiB' then number * 1024 * 1024 * 1024 * 1024
+  # Decimal units (1000-based)
+  when 'KB' then number * 1000
+  when 'MB' then number * 1000 * 1000
+  when 'GB' then number * 1000 * 1000 * 1000
+  when 'TB' then number * 1000 * 1000 * 1000 * 1000
+  else
+    warn "Error: Unknown unit '#{unit}'"
+    exit 1
+  end.to_i
+end
+
+def find_identical_files(root_dir = Dir.home, min_size = 0, quiet = false, format = 'human', select_mode = nil)
+  # Hash to store files grouped by their SHA512 hash
+  files_by_hash = Hash.new { |h, k| h[k] = [] }
+  
+  warn "Scanning files in #{root_dir}..." unless quiet
+  
+  file_count = 0
+  skipped_count = 0
+  Find.find(root_dir) do |path|
+    next unless File.file?(path)
+    
+    # Skip hidden files AND files in hidden directories
+    # Handle encoding issues by forcing UTF-8 and replacing invalid sequences
+    safe_path = path.encode('UTF-8', invalid: :replace, undef: :replace)
+    next if safe_path =~ /(^\.|\/\.)/
+    
+    begin
+      # Skip if file is not readable
+      unless File.readable?(path)
+        warn "Skipping unreadable: #{path}" if !quiet && skipped_count < 5
+        skipped_count += 1
+        next
+      end
+      
+      # Skip files smaller than minimum size
+      file_size = File.size(path)
+      next if file_size < min_size
+      
+      # Calculate SHA512 hash
+      hash = Digest::SHA512.file(path).hexdigest
+      files_by_hash[hash] << path
+      file_count += 1
+      warn "Processed: #{path} -> #{hash[0..8]}..." if !quiet && file_count <= 10
+      
+    rescue => e
+      # Skip files that cause errors (permission issues, etc.)
+      next
+    end
+  end
+  
+  unless quiet
+    warn "Processed #{file_count} files, skipped #{skipped_count}, checking for duplicates..."
+    warn "Total unique hashes: #{files_by_hash.keys.length}"
+    warn
+  end
+  
+  # Find groups with identical content (same hash, multiple files)
+  identical_groups = []
+  
+  files_by_hash.each do |hash, paths|
+    if paths.length > 1
+      identical_groups << {
+        hash: hash,
+        paths: paths,
+        size: File.size(paths.first)
+      }
+    end
+  end
+  
+  # Apply selection filter if specified
+  if select_mode && !identical_groups.empty?
+    identical_groups.each do |group|
+      case select_mode
+      when 'shortest'
+        group[:paths] = [group[:paths].min_by(&:length)]
+      when 'longest'
+        group[:paths] = [group[:paths].max_by(&:length)]
+      end
+    end
+  end
+
+  # Output results based on format
+  case format
+  when 'json'
+    output_json(identical_groups)
+  when 'list'
+    output_list(identical_groups)
+  when 'null'
+    output_null(identical_groups)
+  else
+    output_human(identical_groups, quiet)
+  end
+end
+
+def output_json(identical_groups)
+  require 'json'
+  result = {
+    groups: identical_groups.map do |group|
+      {
+        hash: group[:hash],
+        size: group[:size],
+        paths: group[:paths]
+      }
+    end
+  }
+  puts JSON.pretty_generate(result)
+end
+
+def output_list(identical_groups)
+  identical_groups.each do |group|
+    group[:paths].each do |path|
+      puts path
+    end
+  end
+end
+
+def output_null(identical_groups)
+  identical_groups.each do |group|
+    group[:paths].each do |path|
+      print "#{path}\0"
+    end
+  end
+end
+
+def output_human(identical_groups, quiet)
+  if identical_groups.empty?
+    warn "No identical files found!" unless quiet
+  else
+    warn "Found #{identical_groups.length} groups of identical files:\n\n" unless quiet
+
+    identical_groups.each_with_index do |group, index|
+      warn "Group #{index + 1}:"
+      warn "  Size: #{format_size(group[:size])}"
+      warn "  SHA512: #{group[:hash][0..16]}..."
+      warn "  Files:"
+      group[:paths].each do |path|
+        warn "    #{path}"
+      end
+      warn
+    end
+    
+    unless quiet
+      # Summary
+      total_files = identical_groups.sum { |g| g[:paths].length }
+      total_duplicates = total_files - identical_groups.length
+      total_wasted_space = identical_groups.sum { |g|  ( g[:size]  * (g[:paths].length - 1)) } 
+      
+      warn "Summary:"
+      warn "  Total identical files: #{total_files}"
+      warn "  Total duplicates: #{total_duplicates}"
+      warn "  Wasted space: #{format_size(total_wasted_space)}"
+    end
+  end
+end
+
+def format_size(bytes)
+  units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  size = bytes.to_f
+  unit_index = 0
+  
+  while size >= 1024 && unit_index < units.length - 1
+    size /= 1024
+    unit_index += 1
+  end
+  
+  if size >= 10
+    return "#{size.round(1)} #{units[unit_index]}"
+  else
+    return "#{size.round(2)} #{units[unit_index]}"
+  end
+end
+
+# Run the script
+if __FILE__ == $0
+  # Parse command line arguments
+  min_size = 0
+  root_directory = nil
+  quiet = false
+  format = 'human'
+  select_mode = nil
+  i = 0
+
+  while i < ARGV.length
+    case ARGV[i]
+    when '--bigger'
+      if i + 1 < ARGV.length
+        min_size = parse_size(ARGV[i + 1])
+        i += 2
+      else
+        warn "Error: --bigger requires a size argument"
+        exit 1
+      end
+    when '--quiet', '-q'
+      quiet = true
+      i += 1
+    when '--format'
+      if i + 1 < ARGV.length
+        format = ARGV[i + 1]
+        unless ['human', 'json', 'list', 'null'].include?(format)
+          warn "Error: Invalid format '#{format}'. Valid formats: human, json, list, null"
+          exit 1
+        end
+        i += 2
+      else
+        warn "Error: --format requires an argument"
+        exit 1
+      end
+    when '--select'
+      if i + 1 < ARGV.length
+        select_mode = ARGV[i + 1]
+        unless ['shortest', 'longest'].include?(select_mode)
+          warn "Error: Invalid select mode '#{select_mode}'. Valid modes: shortest, longest"
+          exit 1
+        end
+        i += 2
+      else
+        warn "Error: --select requires an argument"
+        exit 1
+      end
+    when '--help', '-h'
+      warn "Usage: #{$0} [OPTIONS] [DIRECTORY]"
+      warn ""
+      warn "Find duplicate files by content (SHA512 hash)"
+      warn ""
+      warn "Options:"
+      warn "  --bigger SIZE     Only check files larger than SIZE (e.g., 1MB, 500KB)"
+      warn "  --quiet, -q       Suppress progress messages"
+      warn "  --format FORMAT   Output format: human, json, list, null (default: human)"
+      warn "  --select MODE     Select which duplicates to show: shortest, longest"
+      warn "  --help, -h        Show this help message"
+      warn ""
+      warn "Examples:"
+      warn "  #{$0} /home/user                    # Find duplicates in /home/user"
+      warn "  #{$0} --bigger 1MB .               # Find duplicates larger than 1MB"
+      warn "  #{$0} --quiet --format=list .      # List duplicate paths only"
+      warn "  #{$0} --format=null --select=longest . | xargs -0 rm"
+      exit 0
+    else
+      # Assume it's the directory path
+      root_directory = ARGV[i]
+      i += 1
+    end
+  end
+
+  root_directory ||= Dir.home
+  
+  # Expand the path to handle cases like "." or relative paths
+  root_directory = File.expand_path(root_directory)
+  
+  unless Dir.exist?(root_directory)
+    warn "Error: Directory '#{root_directory}' does not exist"
+    exit 1
+  end
+  
+  find_identical_files(root_directory, min_size, quiet, format, select_mode)
+end
