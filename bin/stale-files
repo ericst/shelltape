@@ -1,0 +1,397 @@
+#!/usr/bin/env ruby
+# stale-files - Find Files with High Staleness Scores
+# Author: Eric Seuret
+# License: MIT
+#
+# MIT License
+#
+# Copyright (c) 2025 Eric Seuret
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Description:
+# A command-line tool that finds files with high staleness scores based on
+# size × days since last access (atime). Helps identify large, unused files
+# that are candidates for cleanup. Supports filtering, output formatting,
+# and optional deletion with confirmation prompts.
+#
+# Usage:
+#   stale-files [OPTIONS] DIRECTORY...
+#   stale-files /home/user
+#   stale-files -n 10 /tmp
+#   stale-files -s 1GB /var/log
+#   stale-files -a /home/user
+#   stale-files --rm -n 5 /tmp
+#   
+# Examples:
+#   # List all files by staleness score
+#   stale-files /home/user/Downloads
+#   
+#   # Show top 10 stalest files
+#   stale-files -n 10 /tmp
+#   
+#   # Show files until 1GB total size
+#   stale-files -s 1GB /var/log
+#   
+#   # Include hidden files and directories
+#   stale-files -a /home/user
+#   
+#   # Show long format with size and staleness columns
+#   stale-files -l /tmp
+#   
+#   # Show long format with human-readable sizes and staleness
+#   stale-files -lh /tmp
+#   
+#   # Output null-separated for xargs
+#   stale-files -0 /data | xargs -0 ls -la
+#   
+#   # Delete top 5 stalest files with confirmation
+#   stale-files --rm -n 5 /tmp
+
+require 'optparse'
+require 'find'
+require 'set'
+
+def parse_size(size_str)
+  size_str = size_str.strip
+  
+  match = size_str.match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z]*)$/i)
+  unless match
+    warn "Error: Invalid size format '#{size_str}'"
+    exit 1
+  end
+  
+  number = match[1].to_f
+  unit = match[2].downcase
+  
+  case unit
+  when '', 'b'
+    number.to_i
+  when 'kb'
+    (number * 1000).to_i
+  when 'kib'
+    (number * 1024).to_i
+  when 'mb'
+    (number * 1000 * 1000).to_i
+  when 'mib'
+    (number * 1024 * 1024).to_i
+  when 'gb'
+    (number * 1000 * 1000 * 1000).to_i
+  when 'gib'
+    (number * 1024 * 1024 * 1024).to_i
+  when 'tb'
+    (number * 1000 * 1000 * 1000 * 1000).to_i
+  when 'tib'
+    (number * 1024 * 1024 * 1024 * 1024).to_i
+  else
+    warn "Error: Unknown size unit '#{unit}'"
+    exit 1
+  end
+end
+
+def format_size(bytes)
+  units = ['B', 'KB', 'MB', 'GB', 'TB']
+  size = bytes.to_f
+  unit_index = 0
+  
+  while size >= 1000 && unit_index < units.length - 1
+    size /= 1000.0
+    unit_index += 1
+  end
+  
+  if size == size.to_i
+    "#{size.to_i}#{units[unit_index]}"
+  else
+    "%.1f#{units[unit_index]}" % size
+  end
+end
+
+def format_size_human(bytes)
+  units = ['B', 'kB', 'MB', 'GB', 'TB']
+  size = bytes.to_f
+  unit_index = 0
+  
+  while size >= 1000 && unit_index < units.length - 1
+    size /= 1000.0
+    unit_index += 1
+  end
+  
+  number_str = "%.1f" % size
+  unit_str = units[unit_index]
+  
+  [number_str, unit_str]
+end
+
+def format_staleness_human(staleness)
+  units = ['Bd', 'kBd', 'MBd', 'GBd', 'TBd']
+  score = staleness.to_f
+  unit_index = 0
+  
+  while score >= 1000 && unit_index < units.length - 1
+    score /= 1000.0
+    unit_index += 1
+  end
+  
+  number_str = "%.1f" % score
+  unit_str = units[unit_index]
+  
+  [number_str, unit_str]
+end
+
+def find_stale_files(directories, options = {})
+  files = []
+  
+  directories.each do |dir|
+    unless File.directory?(dir)
+      warn "Warning: #{dir} is not a directory, skipping"
+      next
+    end
+
+    Find.find(dir) do |path|
+      # Skip hidden directories unless --all is specified
+      if File.directory?(path) && File.basename(path).start_with?('.') && path != dir && !options[:all]
+        Find.prune
+        next
+      end
+      
+      next if File.directory?(path)
+      next unless File.file?(path)
+      
+      # Skip hidden files unless --all is specified
+      next if File.basename(path).start_with?('.') && !options[:all]
+      
+      begin
+        stat = File.stat(path)
+        files << {
+          path: path,
+          size: stat.size,
+          atime: stat.atime,
+          staleness: nil
+        }
+      rescue => e
+        warn "Warning: Cannot access #{path}: #{e.message}"
+      end
+    end
+  end
+  
+  now = Time.now
+  files.each do |file|
+    days_old = (now - file[:atime]) / (24 * 60 * 60)
+    days_old = [days_old, 1].max
+    file[:staleness] = file[:size] * days_old
+  end
+  
+  files.sort_by! { |file| -file[:staleness] }
+  
+  if options[:limit]
+    files = files.first(options[:limit])
+  end
+
+  if options[:size_limit]
+    total_size = 0
+    limited_files = []
+    
+    files.each do |file|
+      break if limited_files.length > 0 && total_size + file[:size] > options[:size_limit]
+      limited_files << file
+      total_size += file[:size]
+    end
+    
+    files = limited_files
+  end
+  
+  files
+end
+
+def output_files(files, options = {})
+  null_separator = options[:null_separator] || false
+  long_format = options[:long_format] || false
+  human_readable = options[:human_readable] || false
+  
+  if long_format
+    # First pass: calculate column widths
+    max_size_num_width = 0
+    max_size_unit_width = 0
+    max_staleness_num_width = 0
+    max_staleness_unit_width = 0
+    
+    formatted_data = files.map do |file|
+      if human_readable
+        size_num, size_unit = format_size_human(file[:size])
+        staleness_num, staleness_unit = format_staleness_human(file[:staleness])
+      else
+        size_num = "%.1f" % file[:size]
+        size_unit = ""
+        staleness_num = "%.1f" % file[:staleness]
+        staleness_unit = ""
+      end
+      
+      max_size_num_width = [max_size_num_width, size_num.length].max
+      max_size_unit_width = [max_size_unit_width, size_unit.length].max
+      max_staleness_num_width = [max_staleness_num_width, staleness_num.length].max
+      max_staleness_unit_width = [max_staleness_unit_width, staleness_unit.length].max
+      
+      {
+        size_num: size_num,
+        size_unit: size_unit,
+        staleness_num: staleness_num,
+        staleness_unit: staleness_unit,
+        path: file[:path]
+      }
+    end
+    
+    # Second pass: output with proper alignment
+    formatted_data.each do |data|
+      if human_readable
+        size_str = "%*s %s" % [max_size_num_width, data[:size_num], data[:size_unit]]
+        staleness_str = "%*s %s" % [max_staleness_num_width, data[:staleness_num], data[:staleness_unit]]
+        
+        # Calculate total width for size and staleness columns
+        size_col_width = max_size_num_width + 1 + max_size_unit_width
+        staleness_col_width = max_staleness_num_width + 1 + max_staleness_unit_width
+        
+        printf "%-*s  %-*s  %s\n", size_col_width, size_str, staleness_col_width, staleness_str, data[:path]
+      else
+        printf "%*s %*s %s\n", max_size_num_width, data[:size_num], max_staleness_num_width, data[:staleness_num], data[:path]
+      end
+    end
+  else
+    separator = null_separator ? "\0" : "\n"
+    
+    files.each do |file|
+      print file[:path]
+      print separator
+    end
+  end
+end
+
+def delete_files(files)
+  return if files.empty?
+  
+  deleted_dirs = Set.new
+  
+  files.each do |file|
+    print "Delete #{file[:path]} (#{format_size(file[:size])})? [y/N]: "
+    response = STDIN.gets.chomp.downcase
+    
+    if response == 'y' || response == 'yes'
+      begin
+        File.delete(file[:path])
+        puts "Deleted: #{file[:path]}"
+        deleted_dirs.add(File.dirname(file[:path]))
+      rescue => e
+        warn "Error deleting #{file[:path]}: #{e.message}"
+      end
+    else
+      puts "Skipped: #{file[:path]}"
+    end
+  end
+  
+end
+
+if __FILE__ == $0
+  options = {
+    limit: nil,
+    size_limit: nil,
+    null_separator: false,
+    remove: false,
+    long_format: false,
+    human_readable: false,
+    all: false
+  }
+
+  OptionParser.new do |opts|
+    opts.banner = "Usage: stale-files [OPTIONS] DIRECTORY..."
+    opts.separator ""
+    opts.separator "Find files with high staleness scores (size × days since last access)"
+    opts.separator ""
+    opts.separator "Options:"
+
+    opts.on("-n", "--limit NUM", Integer, "Show only first NUM files") do |n|
+      options[:limit] = n
+    end
+
+    opts.on("-s", "--size SIZE", String, "Show files until combined size reaches SIZE") do |size|
+      options[:size_limit] = parse_size(size)
+    end
+
+    opts.on("-0", "--null", "Use null separators for output (xargs compatible)") do
+      options[:null_separator] = true
+    end
+
+    opts.on("-l", "--long", "Use long format with size and staleness columns") do
+      options[:long_format] = true
+    end
+
+    opts.on("-h", "--human-readable", "Display sizes and staleness in human-readable format") do
+      options[:human_readable] = true
+    end
+
+    opts.on("-a", "--all", "Include hidden files and directories") do
+      options[:all] = true
+    end
+
+    opts.on("--rm", "Delete files (with confirmation prompts)") do
+      options[:remove] = true
+    end
+
+    opts.on("--help", "Show this help message") do
+      puts opts
+      exit
+    end
+  end.parse!
+  
+  if ARGV.empty?
+    puts "Usage: stale-files [OPTIONS] DIRECTORY..."
+    puts "Try 'stale-files --help' for more information."
+    exit 1
+  end
+
+  files = find_stale_files(ARGV, options)
+  output_files(files, options)
+  
+  if options[:remove]
+    delete_files(files)
+  end
+end
+
+# TODO: Future enhancements
+# 
+# Filtering Options:
+# - --min-size SIZE: Only consider files larger than SIZE
+# - --min-age DAYS: Only consider files older than DAYS  
+# - --exclude PATTERN: Exclude files matching glob pattern
+# - --include PATTERN: Only include files matching pattern
+# - --max-depth N: Limit directory traversal depth
+# - --follow-symlinks: Follow symbolic links (default: skip)
+#
+# Output Options:
+# - --human: Display sizes in human-readable format in output
+# - --show-score: Display the staleness score alongside each file
+# - --sort-by [score|size|age]: Alternative sorting methods
+# - --reverse: Reverse sort order (show least stale first)
+#
+# Safety Options:
+# - --dry-run: Show what would be deleted without actually deleting
+# - --interactive: Prompt for each individual file deletion
+# - --force: Skip confirmation prompts (for scripting)
+#
+# Performance Options:
+# - --threads N: Use N threads for file system operations
+# - --progress: Show progress bar for large directory scans
