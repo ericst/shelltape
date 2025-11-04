@@ -1,0 +1,140 @@
+#!/usr/bin/env ruby
+# git-init-remote - Create Remote Git Repository and Clone Locally
+# Author: Eric Seuret
+# License: MIT
+#
+# MIT License
+#
+# Copyright (c) 2025 Eric Seuret
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Description:
+# A command-line tool that creates a bare git repository on a remote server
+# (mars.ericst.ch) and clones it locally. Simplifies the workflow of setting
+# up new git repositories with remote backup/sharing capabilities.
+#
+# Usage:
+#   git-init-remote REPO_NAME
+#   git-init-remote my-project
+#   
+# Examples:
+#   # Create a new repository called "my-project"
+#   git-init-remote my-project
+#   
+#   # Create a repository with dashes in the name
+#   git-init-remote my-awesome-project
+
+require 'fileutils'
+
+# Configuration
+REMOTE_HOST = "mars.ericst.ch"
+REMOTE_PATH = "~/git"
+
+def show_usage
+  script_name = File.basename($0)
+  STDERR.puts <<~USAGE
+    Usage: #{script_name} REPO_NAME
+
+    Create a bare git repository on #{REMOTE_HOST} and clone it locally.
+
+    Arguments:
+      REPO_NAME    Name of the repository to create (will append .git automatically)
+
+    Examples:
+      #{script_name} my-project
+      #{script_name} awesome-app
+
+    Options:
+      --help, -h   Show this help message
+
+    The repository will be created at:
+      Remote: #{REMOTE_HOST}:#{REMOTE_PATH}/REPO_NAME.git
+      Local:  ./REPO_NAME
+  USAGE
+  exit 1
+end
+
+def validate_repo_name(name)
+  unless name =~ /^[a-zA-Z0-9._-]+$/
+    STDERR.puts "Error: Repository name can only contain letters, numbers, dots, dashes, and underscores"
+    exit 1
+  end
+end
+
+def create_remote_repo(repo_name)
+  STDERR.puts "Creating bare repository on #{REMOTE_HOST}..."
+  
+  cmd = "ssh #{REMOTE_HOST} 'mkdir -p #{REMOTE_PATH} && git init --bare #{REMOTE_PATH}/#{repo_name}.git'"
+  
+  unless system(cmd)
+    STDERR.puts "Error: Failed to create remote repository"
+    exit 1
+  end
+  
+  STDERR.puts "Remote repository created: #{REMOTE_HOST}:#{REMOTE_PATH}/#{repo_name}.git"
+  STDERR.puts
+end
+
+def clone_repo(repo_name)
+  STDERR.puts "Cloning repository locally..."
+  
+  remote_url = "#{REMOTE_HOST}:#{REMOTE_PATH}/#{repo_name}.git"
+  
+  unless system("git", "clone", remote_url, repo_name)
+    STDERR.puts "Error: Failed to clone repository"
+    exit 1
+  end
+  
+  STDERR.puts
+  STDERR.puts "Success! Repository created and cloned to ./#{repo_name}"
+  STDERR.puts "Remote: #{REMOTE_HOST}:#{REMOTE_PATH}/#{repo_name}.git"
+end
+
+# Main execution
+if __FILE__ == $0
+  # Check for help flag
+  if ARGV.empty? || ARGV.include?('--help') || ARGV.include?('-h')
+    show_usage
+  end
+  
+  # Validate arguments
+  if ARGV.length != 1
+    STDERR.puts "Error: Repository name required"
+    STDERR.puts
+    show_usage
+  end
+  
+  repo_name = ARGV[0]
+  
+  # Validate repository name
+  validate_repo_name(repo_name)
+  
+  # Check if local directory already exists
+  if Dir.exist?(repo_name)
+    STDERR.puts "Error: Directory '#{repo_name}' already exists"
+    exit 1
+  end
+  
+  # Create remote repository
+  create_remote_repo(repo_name)
+  
+  # Clone locally
+  clone_repo(repo_name)
+end
