@@ -4,7 +4,7 @@ set -xeu
 
 # Cleanup function
 cleanup() {
-    rm -f /tmp/opencode-linux-x64.zip
+    rm -f /tmp/opencode-linux-x64.tar.gz
 }
 trap cleanup EXIT
 
@@ -12,13 +12,13 @@ trap cleanup EXIT
 mkdir -p $HOME/bin
 
 # Get the latest release download URL for the zip file
-DOWNLOAD_URL=$(curl -s https://api.github.com/repos/sst/opencode/releases/latest | grep "browser_download_url.*opencode-linux-x64.zip" | cut -d '"' -f 4)
+DOWNLOAD_URL=$(curl -s https://api.github.com/repos/sst/opencode/releases/latest | grep "browser_download_url.*opencode-linux-x64.tar.gz" | cut -d '"' -f 4)
 
 # Download the zip file
-curl -L $DOWNLOAD_URL -o /tmp/opencode-linux-x64.zip
+curl -L $DOWNLOAD_URL -o /tmp/opencode-linux-x64.tar.gz
 
 # Extract to $HOME/bin
-unzip -o /tmp/opencode-linux-x64.zip -d $HOME/bin
+tar xaf /tmp/opencode-linux-x64.tar.gz -C $HOME/bin opencode
 
 # Make executable
 chmod +x $HOME/bin/opencode
